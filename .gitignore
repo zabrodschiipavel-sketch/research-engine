@@ -5,3 +5,4 @@ runs/
 corpus.db
 corpus.db-wal
 corpus.db-shm
+.claude/settings.local.json

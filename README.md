@@ -139,11 +139,28 @@ READ-поверхность корпуса, 6 штук: `search_corpus`, `ask_co
 
 Подхват конфига Claude Code тоже проверен вживую: `claude mcp list` /
 `claude mcp get research-engine` изнутри репозитория видят сервер с
-правильным command/args из `.mcp.json`. Статус будет
-`⏸ Pending approval` до первого интерактивного `claude` в этой папке —
-это штатный one-time trust-gate для project-scoped MCP-серверов, не
-баг; одобрить его может только сам пользователь. `opencode.json`
-таким же образом не перепроверялся — свой клиент, свой флоу доверия.
+правильным command/args из `.mcp.json`. На Windows approval-диалог
+project-scoped MCP-серверов может вообще не появиться при обычном
+запуске `claude` — известный баг ([issue #9189](https://github.com/anthropics/claude-code/issues/9189),
+[issue #13389](https://github.com/anthropics/claude-code/issues/13389),
+второй воспроизведён именно на Windows). Если после интерактивного
+`claude` в этой папке `claude mcp list` всё ещё показывает
+`⏸ Pending approval`, обходной путь из официальных доков
+(`code.claude.com/docs/en/mcp`, актуален для версий до v2.1.207) —
+создать неотслеживаемый `.claude/settings.local.json`:
+
+```json
+{
+  "enabledMcpjsonServers": ["research-engine"]
+}
+```
+
+Файл уже в `.gitignore` — именно неотслеживаемость (git не видит файл
+как tracked) и есть условие, при котором approval применяется даже без
+прохождения trust-диалога. Проверено вживую — после этого `claude mcp
+list` показывает `research-engine: ... - ✔ Connected` (реальный
+health-check, не кэш). `opencode.json` таким же образом не
+перепроверялся — свой клиент, свой флоу доверия.
 
 ## Секреты
 
