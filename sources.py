@@ -55,6 +55,42 @@ TOOL_SPECS = [
         },
     },
     {
+        "name": "graph_cites",
+        "description": "Что цитирует данная работа (граф цитирований, backward) — из уже накопленных данных, бесплатно и мгновенно. Работает только для работ, уже найденных через search_openalex (нужен DOI из его результатов).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "doi": {"type": "string", "description": "DOI работы (из результатов search_openalex/search_corpus)"},
+                "limit": {"type": "integer", "description": "1-30, дефолт 20"},
+            },
+            "required": ["doi"],
+        },
+    },
+    {
+        "name": "graph_cited_by",
+        "description": "Кто цитирует данную работу (граф цитирований, forward) — живой запрос к OpenAlex, стоит API-вызова (в отличие от graph_cites). Находит развитие идеи и более свежие работы, которые текстовый поиск может не найти.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "doi": {"type": "string", "description": "DOI работы (из результатов search_openalex/search_corpus)"},
+                "limit": {"type": "integer", "description": "1-30, дефолт 20"},
+            },
+            "required": ["doi"],
+        },
+    },
+    {
+        "name": "graph_related",
+        "description": "Похожие работы по оценке самого OpenAlex (topic/embedding similarity) — из уже накопленных данных, бесплатно и мгновенно. Хорошо для расширения обзора за пределы точного текстового совпадения.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "doi": {"type": "string", "description": "DOI работы (из результатов search_openalex/search_corpus)"},
+                "limit": {"type": "integer", "description": "1-30, дефолт 10"},
+            },
+            "required": ["doi"],
+        },
+    },
+    {
         "name": "search_core",
         "description": "Поиск в CORE (открытые полные тексты статей). Лучше всего работает точный запрос title:\"Точное название\". Возвращает работы с длиной доступного полного текста и core_id.",
         "parameters": {
@@ -175,13 +211,50 @@ def reconstruct_abstract(inv_idx, limit=350):
     return text[:limit]
 
 
-def search_openalex(query, from_year=None, per_page=8, sort_by_citations=False):
-    params = {
-        "search": query,
-        "per-page": min(int(per_page or 8), 15),
-        "api_key": SECRETS["openalex"],
-        "select": "title,publication_year,authorships,primary_location,cited_by_count,doi,abstract_inverted_index",
+_OPENALEX_SELECT = (
+    "id,title,publication_year,authorships,primary_location,cited_by_count,doi,"
+    "abstract_inverted_index,referenced_works,related_works"
+)
+
+
+def _bare_openalex_id(url_or_id):
+    if not url_or_id:
+        return None
+    return url_or_id.rsplit("/", 1)[-1]
+
+
+def _parse_openalex_work(w):
+    auth = ", ".join(a["author"]["display_name"] for a in (w.get("authorships") or [])[:4])
+    inst = ""
+    for a in (w.get("authorships") or [])[:1]:
+        insts = a.get("institutions") or []
+        if insts:
+            inst = insts[0].get("display_name", "")
+    venue = ((w.get("primary_location") or {}).get("source") or {}).get("display_name", "")
+    return {
+        "title": w.get("title"),
+        "year": w.get("publication_year"),
+        "authors": auth,
+        "institution": inst,
+        "venue": venue,
+        "cited_by": w.get("cited_by_count"),
+        "doi": w.get("doi"),
+        "abstract": reconstruct_abstract(w.get("abstract_inverted_index")),
+        "openalex_id": _bare_openalex_id(w.get("id")),
+        "referenced_works": [_bare_openalex_id(x) for x in (w.get("referenced_works") or [])],
+        "related_works": [_bare_openalex_id(x) for x in (w.get("related_works") or [])],
     }
+
+
+def _openalex_get(params):
+    params = {**params, "api_key": SECRETS["openalex"]}
+    url = "https://api.openalex.org/works?" + urllib.parse.urlencode(params)
+    with urllib.request.urlopen(url, timeout=60) as r:
+        return json.loads(r.read().decode())
+
+
+def search_openalex(query, from_year=None, per_page=8, sort_by_citations=False):
+    params = {"search": query, "per-page": min(int(per_page or 8), 15), "select": _OPENALEX_SELECT}
     filters = []
     if from_year:
         filters.append(f"from_publication_date:{from_year}-01-01")
@@ -189,33 +262,45 @@ def search_openalex(query, from_year=None, per_page=8, sort_by_citations=False):
         params["filter"] = ",".join(filters)
     if sort_by_citations:
         params["sort"] = "cited_by_count:desc"
-    url = "https://api.openalex.org/works?" + urllib.parse.urlencode(params)
-    with urllib.request.urlopen(url, timeout=60) as r:
-        data = json.loads(r.read().decode())
-    out = []
-    for w in data.get("results", []):
-        auth = ", ".join(a["author"]["display_name"] for a in (w.get("authorships") or [])[:4])
-        inst = ""
-        for a in (w.get("authorships") or [])[:1]:
-            insts = a.get("institutions") or []
-            if insts:
-                inst = insts[0].get("display_name", "")
-        venue = ((w.get("primary_location") or {}).get("source") or {}).get("display_name", "")
-        out.append({
-            "title": w.get("title"),
-            "year": w.get("publication_year"),
-            "authors": auth,
-            "institution": inst,
-            "venue": venue,
-            "cited_by": w.get("cited_by_count"),
-            "doi": w.get("doi"),
-            "abstract": reconstruct_abstract(w.get("abstract_inverted_index")),
-        })
-    return out
+    data = _openalex_get(params)
+    return [_parse_openalex_work(w) for w in data.get("results", [])]
+
+
+def graph_cited_by(doi, limit=20):
+    resolved = corpus.resolve_openalex_id(doi)
+    if not resolved or not resolved[1]:
+        return {"error": "работа не найдена в корпусе по этому DOI, либо найдена не через OpenAlex (нет openalex_id)"}
+    seed_oaid = resolved[1]
+    params = {
+        "filter": f"cites:{seed_oaid}",
+        "per-page": min(int(limit or 20), 30),
+        "select": _OPENALEX_SELECT,
+        "sort": "cited_by_count:desc",
+    }
+    data = _openalex_get(params)
+    parsed = [_parse_openalex_work(w) for w in data.get("results", [])]
+    corpus.ingest_openalex(parsed)  # обогащаем корпус + рёбра из referenced_works/related_works каждой найденной работы
+    for w in parsed:
+        # Явно: мы и так знаем "w cites seed" (это и есть cites:-фильтр) - не
+        # полагаемся на то, что seed обязательно попал в w["referenced_works"].
+        if w.get("openalex_id"):
+            corpus.add_edges("cites", w["openalex_id"], [seed_oaid])
+    return [
+        {"title": w["title"], "doi": w["doi"], "year": w["year"], "cited_by": w["cited_by"]}
+        for w in parsed
+    ]
 
 
 def search_corpus(query, limit=8):
     return corpus.hybrid_search(query, limit=limit)
+
+
+def graph_cites(doi, limit=20):
+    return corpus.graph_cites(doi, limit=limit)
+
+
+def graph_related(doi, limit=10):
+    return corpus.graph_related(doi, limit=limit)
 
 
 TOOL_FUNCTIONS = {
@@ -224,6 +309,9 @@ TOOL_FUNCTIONS = {
     "search_core": search_core,
     "get_fulltext": get_fulltext,
     "search_brave": search_brave,
+    "graph_cites": graph_cites,
+    "graph_cited_by": graph_cited_by,
+    "graph_related": graph_related,
 }
 
 _INGEST = {

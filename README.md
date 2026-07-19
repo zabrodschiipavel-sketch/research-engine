@@ -9,8 +9,9 @@ DeepSeek и Gemini (оба через нативный function calling): сам
 похода во внешние API (см. Фазу 1 в [ROADMAP.md](ROADMAP.md)).
 
 Выделен из [ggrs](https://github.com/zabrodschiipavel-sketch/ggrs)
-(`tools/research_agent.py`) в самостоятельный инструмент — база для
-дальнейших обвязок (RAG, граф знаний и т.п., см. [ROADMAP.md](ROADMAP.md)).
+(`tools/research_agent.py`) в самостоятельный инструмент, дальше
+дообвязан локальным RAG (гибридный BM25+вектор поиск) и графом
+цитирований — см. [ROADMAP.md](ROADMAP.md).
 
 ## Использование
 
@@ -34,9 +35,9 @@ python research.py ask "вопрос"
 
 Оба драйвера используют один и тот же набор инструментов из
 [sources.py](sources.py) (`search_corpus`, `search_openalex`,
-`search_core`, `get_fulltext`, `search_brave`) — сравнение моделей
-получается на равных условиях. Пример прогона обеих моделей на
-одинаковых темах —
+`search_core`, `get_fulltext`, `search_brave`, `graph_cites`,
+`graph_cited_by`, `graph_related`) — сравнение моделей получается на
+равных условиях. Пример прогона обеих моделей на одинаковых темах —
 [comparisons/2026-07-19-deepseek-vs-gemini](comparisons/2026-07-19-deepseek-vs-gemini/SUMMARY.md).
 
 ## Память между запусками
@@ -78,6 +79,24 @@ ask` используют `corpus.hybrid_search` — RRF-слияние BM25 и 
 `http://127.0.0.1:8099/v1/embeddings`, OpenAI-совместимый формат).
 Gemini embeddings API как альтернатива — не реализовано, локальный
 путь оказался достаточным.
+
+## Граф цитирований (Фаза 3)
+
+Детерминированный, без LLM — построен на полях OpenAlex, которые и так
+приходят бесплатно вместе с `search_openalex` (`referenced_works` и
+`related_works`, последнее — готовая оценка похожести от самого
+OpenAlex, без своей co-citation эвристики):
+
+- `graph_cites(doi)` — что работа цитирует; локально, бесплатно.
+- `graph_related(doi)` — похожие работы по OpenAlex; локально, бесплатно.
+- `graph_cited_by(doi)` — кто цитирует работу; **живой** запрос к
+  OpenAlex (`filter=cites:...`), обогащает корпус найденными работами.
+
+Все три принимают DOI (он уже есть в любом результате
+`search_openalex`/`search_corpus`) — агент цепляет их естественно, без
+дополнительного маппинга ID. LLM-извлечение сущностей, GraphRAG и
+поиск путей между работами — сознательно не реализованы, см. Фазу 3 в
+[ROADMAP.md](ROADMAP.md).
 
 ## Секреты
 

@@ -81,13 +81,31 @@ CREATE TABLE IF NOT EXISTS chunks (
     UNIQUE(work_id, chunk_index)
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_work_id ON chunks(work_id);
+
+CREATE TABLE IF NOT EXISTS work_edges (
+    kind TEXT NOT NULL,
+    from_id TEXT NOT NULL,
+    to_id TEXT NOT NULL,
+    PRIMARY KEY (kind, from_id, to_id)
+);
+CREATE INDEX IF NOT EXISTS idx_work_edges_to ON work_edges(kind, to_id);
 """
+
+
+def _migrate(con):
+    # works.openalex_id появился в Фазе 3 - ALTER для баз, созданных раньше.
+    try:
+        con.execute("ALTER TABLE works ADD COLUMN openalex_id TEXT")
+    except sqlite3.OperationalError:
+        pass  # уже есть
+    con.execute("CREATE INDEX IF NOT EXISTS idx_works_openalex_id ON works(openalex_id)")
 
 
 def _connect():
     con = sqlite3.connect(DB_PATH, timeout=30)
     con.execute("PRAGMA journal_mode=WAL")
     con.executescript(_SCHEMA)
+    _migrate(con)
     return con
 
 
@@ -103,10 +121,14 @@ def _normalize_doi(doi):
     return doi or None
 
 
-def _find_work(con, doi=None, source=None, core_id=None, url=None):
+def _find_work(con, doi=None, source=None, core_id=None, url=None, openalex_id=None):
     doi = _normalize_doi(doi)
     if doi:
         row = con.execute("SELECT id FROM works WHERE doi = ?", (doi,)).fetchone()
+        if row:
+            return row[0]
+    if openalex_id:
+        row = con.execute("SELECT id FROM works WHERE openalex_id = ?", (openalex_id,)).fetchone()
         if row:
             return row[0]
     if source == "core" and core_id is not None:
@@ -142,10 +164,11 @@ def _reindex_fts(con, work_id):
 
 def upsert_work(source, run_id=None, doi=None, core_id=None, url=None, title=None,
                  year=None, authors=None, venue=None, cited_by=None, abstract=None,
-                 description=None, extra=None):
+                 description=None, extra=None, openalex_id=None):
     con = _connect()
     try:
-        wid = _find_work(con, doi=doi, source=source, core_id=core_id, url=url)
+        wid = _find_work(con, doi=doi, source=source, core_id=core_id, url=url,
+                          openalex_id=openalex_id)
         now = _now()
         ndoi = _normalize_doi(doi)
         extra_json = json.dumps(extra, ensure_ascii=False) if extra else None
@@ -153,11 +176,11 @@ def upsert_work(source, run_id=None, doi=None, core_id=None, url=None, title=Non
             cur = con.execute(
                 """INSERT INTO works
                    (source, doi, core_id, url, title, year, authors, venue, cited_by,
-                    abstract, description, extra, first_seen_run, last_seen_run,
+                    abstract, description, extra, openalex_id, first_seen_run, last_seen_run,
                     created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (source, ndoi, core_id, url, title, year, authors, venue, cited_by,
-                 abstract, description, extra_json, run_id, run_id, now, now),
+                 abstract, description, extra_json, openalex_id, run_id, run_id, now, now),
             )
             wid = cur.lastrowid
         else:
@@ -168,10 +191,11 @@ def upsert_work(source, run_id=None, doi=None, core_id=None, url=None, title=Non
                      title = COALESCE(?, title), year = COALESCE(?, year), authors = COALESCE(?, authors),
                      venue = COALESCE(?, venue), cited_by = COALESCE(?, cited_by),
                      abstract = COALESCE(?, abstract), description = COALESCE(?, description),
+                     openalex_id = COALESCE(?, openalex_id),
                      last_seen_run = ?, updated_at = ?
                    WHERE id = ?""",
                 (ndoi, core_id, url, title, year, authors, venue, cited_by, abstract,
-                 description, run_id, now, wid),
+                 description, openalex_id, run_id, now, wid),
             )
         _reindex_fts(con, wid)
         con.commit()
@@ -180,16 +204,35 @@ def upsert_work(source, run_id=None, doi=None, core_id=None, url=None, title=Non
         con.close()
 
 
+def add_edges(kind, from_id, to_ids):
+    if not from_id or not to_ids:
+        return
+    con = _connect()
+    try:
+        con.executemany(
+            "INSERT OR IGNORE INTO work_edges (kind, from_id, to_id) VALUES (?, ?, ?)",
+            [(kind, from_id, to_id) for to_id in to_ids],
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
 def ingest_openalex(results, run_id=None):
-    return [
-        upsert_work(
+    ids = []
+    for w in results:
+        oaid = w.get("openalex_id")
+        wid = upsert_work(
             source="openalex", run_id=run_id, doi=w.get("doi"), title=w.get("title"),
             year=w.get("year"), authors=w.get("authors"), venue=w.get("venue"),
-            cited_by=w.get("cited_by"), abstract=w.get("abstract"),
+            cited_by=w.get("cited_by"), abstract=w.get("abstract"), openalex_id=oaid,
             extra={"institution": w.get("institution")} if w.get("institution") else None,
         )
-        for w in results
-    ]
+        ids.append(wid)
+        if oaid:
+            add_edges("cites", oaid, w.get("referenced_works") or [])
+            add_edges("related", oaid, w.get("related_works") or [])
+    return ids
 
 
 def ingest_core(results, run_id=None):
@@ -275,6 +318,60 @@ def search(query, limit=8):
         }
         for r in rows
     ]
+
+
+def resolve_openalex_id(doi):
+    """DOI -> (work_id, openalex_id) для найденной в корпусе работы, иначе None."""
+    con = _connect()
+    try:
+        ndoi = _normalize_doi(doi)
+        if not ndoi:
+            return None
+        row = con.execute(
+            "SELECT id, openalex_id FROM works WHERE doi = ?", (ndoi,)
+        ).fetchone()
+        return row
+    finally:
+        con.close()
+
+
+def _graph_local(doi, kind, limit):
+    resolved = resolve_openalex_id(doi)
+    if not resolved or not resolved[1]:
+        return {"error": "работа не найдена в корпусе по этому DOI, либо найдена не через OpenAlex (нет openalex_id)"}
+    oaid = resolved[1]
+    n = min(int(limit or 20), 30)
+    con = _connect()
+    try:
+        edges = con.execute(
+            "SELECT to_id FROM work_edges WHERE kind = ? AND from_id = ? LIMIT ?",
+            (kind, oaid, n),
+        ).fetchall()
+        out = []
+        for (to_id,) in edges:
+            w = con.execute(
+                "SELECT title, doi, cited_by FROM works WHERE openalex_id = ?", (to_id,)
+            ).fetchone()
+            out.append({
+                "openalex_id": to_id,
+                "title": w[0] if w else None,
+                "doi": w[1] if w else None,
+                "cited_by": w[2] if w else None,
+                "in_corpus": w is not None,
+            })
+        return out
+    finally:
+        con.close()
+
+
+def graph_cites(doi, limit=20):
+    """Что цитирует работа (backward) - из уже накопленных данных, бесплатно."""
+    return _graph_local(doi, "cites", limit)
+
+
+def graph_related(doi, limit=10):
+    """Похожие работы по оценке OpenAlex - из уже накопленных данных, бесплатно."""
+    return _graph_local(doi, "related", limit)
 
 
 def record_run_start(run_id, provider, model, prompt_file, started_at):
