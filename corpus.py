@@ -68,6 +68,19 @@ CREATE VIRTUAL TABLE IF NOT EXISTS works_fts USING fts5(
     fulltext,
     tokenize = 'unicode61'
 );
+
+CREATE TABLE IF NOT EXISTS chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    work_id INTEGER NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    char_start INTEGER,
+    char_end INTEGER,
+    text TEXT NOT NULL,
+    embedding BLOB,
+    created_at TEXT NOT NULL,
+    UNIQUE(work_id, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS idx_chunks_work_id ON chunks(work_id);
 """
 
 
@@ -286,3 +299,125 @@ def record_run_finish(run_id, finished_at, rounds, usage):
         con.commit()
     finally:
         con.close()
+
+
+def embed_pending_chunks(max_works=None):
+    """Чанкует+эмбеддит fulltexts без chunks. Best-effort: если эмбеддинг-
+    сервер недоступен, тихо останавливается на первой же ошибке вместо
+    падения (не роняет вызывающий прогон — см. RunTrace.finish)."""
+    import chunking
+    import embeddings
+
+    con = _connect()
+    try:
+        rows = con.execute(
+            """SELECT f.work_id, f.full_text FROM fulltexts f
+               WHERE f.work_id IS NOT NULL
+                 AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.work_id = f.work_id)"""
+        ).fetchall()
+    finally:
+        con.close()
+    if max_works:
+        rows = rows[:max_works]
+    if not rows:
+        return {"embedded_works": 0, "chunks": 0}
+
+    total_chunks = 0
+    embedded_works = 0
+    for work_id, full_text in rows:
+        pieces = chunking.split_text(full_text)
+        if not pieces:
+            continue
+        try:
+            vecs = embeddings.embed_documents([p["text"] for p in pieces])
+        except RuntimeError as e:
+            return {"embedded_works": embedded_works, "chunks": total_chunks, "error": str(e)}
+        con = _connect()
+        try:
+            now = _now()
+            for i, (piece, vec) in enumerate(zip(pieces, vecs)):
+                con.execute(
+                    """INSERT OR REPLACE INTO chunks
+                       (work_id, chunk_index, char_start, char_end, text, embedding, created_at)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (work_id, i, piece["start"], piece["end"], piece["text"],
+                     vec.astype("float32").tobytes(), now),
+                )
+            con.commit()
+        finally:
+            con.close()
+        embedded_works += 1
+        total_chunks += len(pieces)
+    return {"embedded_works": embedded_works, "chunks": total_chunks}
+
+
+def vector_search(query_text, limit=8):
+    """Топ чанков по косинусу (brute-force numpy). Возвращает {"error":...}
+    если эмбеддинг-сервер недоступен или в базе ещё нет эмбеддингов."""
+    import numpy as np
+    import embeddings
+
+    try:
+        qvec = embeddings.embed_query(query_text)
+    except RuntimeError as e:
+        return {"error": str(e)}
+
+    con = _connect()
+    try:
+        rows = con.execute(
+            """SELECT c.id, c.work_id, c.text, c.embedding,
+                      w.title, w.doi, w.url, w.source
+               FROM chunks c JOIN works w ON w.id = c.work_id
+               WHERE c.embedding IS NOT NULL"""
+        ).fetchall()
+    finally:
+        con.close()
+    if not rows:
+        return []
+
+    mat = np.vstack([np.frombuffer(r[3], dtype=np.float32) for r in rows])
+    qn = qvec / (np.linalg.norm(qvec) + 1e-9)
+    mn = mat / (np.linalg.norm(mat, axis=1, keepdims=True) + 1e-9)
+    sims = mn @ qn
+    n = min(int(limit or 8), 20)
+    order = np.argsort(-sims)[:n]
+    return [
+        {
+            "chunk_id": rows[i][0], "work_id": rows[i][1], "text": rows[i][2],
+            "title": rows[i][4], "doi": rows[i][5], "url": rows[i][6], "source": rows[i][7],
+            "score": round(float(sims[i]), 4),
+        }
+        for i in order
+    ]
+
+
+def hybrid_search(query, limit=8, k=60):
+    """RRF-слияние BM25 (search, по works) и векторного поиска (по chunks,
+    свёрнуто до лучшего чанка на work). Деградирует до чистого BM25, если
+    эмбеддинг-сервер недоступен или эмбеддингов ещё нет."""
+    bm25 = search(query, limit=max(limit * 3, 20))
+    if isinstance(bm25, dict):
+        bm25 = []
+    vec = vector_search(query, limit=max(limit * 3, 20))
+    if isinstance(vec, dict):
+        vec = []
+
+    vec_best = {}
+    for rank, r in enumerate(vec):
+        vec_best.setdefault(r["work_id"], (rank, r))
+
+    scores, meta = {}, {}
+    for rank, r in enumerate(bm25):
+        wid = r["work_id"]
+        scores[wid] = scores.get(wid, 0.0) + 1.0 / (k + rank + 1)
+        meta.setdefault(wid, dict(r))
+    for wid, (rank, r) in vec_best.items():
+        scores[wid] = scores.get(wid, 0.0) + 1.0 / (k + rank + 1)
+        meta.setdefault(wid, {
+            "work_id": wid, "title": r["title"], "doi": r["doi"],
+            "url": r["url"], "source": r["source"], "abstract": "",
+        })
+        meta[wid]["best_chunk_text"] = r["text"]
+
+    ranked = sorted(scores.items(), key=lambda kv: -kv[1])[: min(int(limit or 8), 20)]
+    return [{**meta[wid], "rrf_score": round(s, 5)} for wid, s in ranked]

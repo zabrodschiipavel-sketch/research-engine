@@ -1,6 +1,9 @@
 """Исследовательский агент: DeepSeek (tool calls) + OpenAlex/CORE/Brave.
 
-Использование: python research.py <prompt_file> <out_file>
+Использование:
+  python research.py <prompt_file> <out_file>   — полный агент с внешними тулами
+  python research.py ask "вопрос"                — ответ ТОЛЬКО по корпусу (Фаза 2), без внешних API
+
 DeepSeek сам решает, какие запросы слать в источники (до MAX_ROUNDS раундов), затем пишет отчёт.
 
 Инструменты — в sources.py (общие с research_gemini.py). Секреты и модель
@@ -12,6 +15,7 @@ import sys
 import urllib.error
 import urllib.request
 
+import corpus
 from sources import CORPUS_HINT, SECRETS, TOOL_SPECS, call_tool
 from trace import RunTrace
 
@@ -99,5 +103,36 @@ def main(prompt_file, out_file):
     sys.exit(1)
 
 
+def ask(question, limit=8):
+    """Фаза 2: ответ по накопленному корпусу, без похода во внешние API.
+    Один вызов DeepSeek на готовых источниках (гибридный BM25+вектор поиск)."""
+    hits = corpus.hybrid_search(question, limit=limit)
+    if not hits:
+        print("В корпусе пока пусто или ничего не нашлось по этому запросу — сначала накопи источники обычными прогонами.")
+        return
+    sources_block = ""
+    for i, h in enumerate(hits, 1):
+        ident = h.get("doi") or h.get("url") or f"work_id={h['work_id']}"
+        passage = h.get("best_chunk_text") or h.get("abstract") or ""
+        sources_block += f"[{i}] {h.get('title')} ({ident})\n{passage[:1200]}\n\n"
+    prompt = (
+        "Ответь на вопрос СТРОГО по источникам ниже. После каждого утверждения "
+        "указывай номер источника в квадратных скобках, например [2]. Если "
+        "источников недостаточно для полного ответа — прямо скажи об этом, "
+        "не выдумывай.\n\n"
+        f"Вопрос: {question}\n\nИсточники:\n{sources_block}"
+    )
+    resp = deepseek([{"role": "user", "content": prompt}], allow_tools=False)
+    answer = resp["choices"][0]["message"].get("content") or ""
+    print(answer)
+    print("\n---\nИсточники:")
+    for i, h in enumerate(hits, 1):
+        ident = h.get("doi") or h.get("url") or ""
+        print(f"[{i}] {h.get('title')} {ident}")
+
+
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    if sys.argv[1] == "ask":
+        ask(sys.argv[2])
+    else:
+        main(sys.argv[1], sys.argv[2])

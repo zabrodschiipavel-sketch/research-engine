@@ -47,4 +47,19 @@ class RunTrace:
         with open(os.path.join(self.dir, "report.txt"), "w", encoding="utf-8", newline="\n") as f:
             f.write(report_text)
         corpus.record_run_finish(self.run_id, finished_at, rounds, usage)
+        self._try_embed_pending()
         return self.dir
+
+    @staticmethod
+    def _try_embed_pending():
+        # Best-effort: чанкинг+эмбеддинг новых fulltexts (Фаза 2). Не должен
+        # ронять уже завершённый прогон, если эмбеддинг-сервер не поднят.
+        try:
+            r = corpus.embed_pending_chunks()
+        except Exception as e:  # noqa: BLE001
+            print(f"[embed] пропущено: {e}")
+            return
+        if r.get("error"):
+            print(f"[embed] {r['error']}")
+        elif r["embedded_works"]:
+            print(f"[embed] {r['embedded_works']} работ, {r['chunks']} чанков")

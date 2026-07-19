@@ -30,7 +30,7 @@ CORPUS_HINT = (
 TOOL_SPECS = [
     {
         "name": "search_corpus",
-        "description": "Поиск по локальной базе уже найденных источников (BM25 по названиям/абстрактам/полным текстам из прошлых запусков). Бесплатно и мгновенно — стоит проверить здесь до похода во внешние API.",
+        "description": "Поиск по локальной базе уже найденных источников (гибрид: BM25 по названиям/абстрактам/полным текстам + векторный поиск по чанкам, если доступен эмбеддинг-сервер — иначе тихо деградирует до BM25). Бесплатно и мгновенно — стоит проверить здесь до похода во внешние API.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -215,7 +215,7 @@ def search_openalex(query, from_year=None, per_page=8, sort_by_citations=False):
 
 
 def search_corpus(query, limit=8):
-    return corpus.search(query, limit=limit)
+    return corpus.hybrid_search(query, limit=limit)
 
 
 TOOL_FUNCTIONS = {
