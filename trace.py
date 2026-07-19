@@ -7,6 +7,7 @@
 import json
 import os
 import time
+import uuid
 
 import corpus
 
@@ -16,7 +17,11 @@ RUNS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs")
 class RunTrace:
     def __init__(self, provider, model, prompt_file):
         ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        self.run_id = f"{ts}-{provider}"
+        # Случайный суффикс - без него параллельные подтемы deep_research(),
+        # стартующие в одну и ту же секунду, получали одинаковый run_id и
+        # тихо перезаписывали runs/<id>/ друг друга (проверено вживую: из
+        # 3 параллельных подтем в runs/ осталась только 1 директория).
+        self.run_id = f"{ts}-{provider}-{uuid.uuid4().hex[:6]}"
         self.dir = os.path.join(RUNS_DIR, self.run_id)
         os.makedirs(self.dir, exist_ok=True)
         self.meta = {

@@ -29,6 +29,7 @@ Point it at a research question. It autonomously decides which of 8 tools to cal
 - **Real empirical model comparison, not vibes**: matched-topic runs across DeepSeek and a 7-model Gemini zoo, cost/quality tradeoffs written up with sources — including a caught citation hallucination (a real DOI, attached to the wrong paper) traced back to a model that had skipped tool use entirely. See [comparisons/](comparisons/).
 - **A real infrastructure bug, found and fixed, not just worked around**: the local embedding server was silently failing on chunks near ~575 tokens; root-caused via server logs to a too-small default batch size, fixed, and codified into the startup script so it can't regress.
 - **The core design premise, quantified rather than assumed**: this project exists to keep expensive research legwork off a Claude Code session's own quota. Measured it directly — the identical research prompt run through `research.py` (DeepSeek) against the same prompt run through isolated `claude -p` sessions came out **23–46× more expensive** on Claude, with comparable output quality. Caught and fixed a real methodology bug along the way (a non-interactive session silently denying an unapproved tool instead of erroring — invisible unless you read the raw event stream). See [comparisons/2026-07-19-claude-vs-research-engine](comparisons/2026-07-19-claude-vs-research-engine/SUMMARY.md).
+- **A real concurrency bug, caught by the evidence disagreeing with the code, not by inspection**: adding parallel subtopic research (`research.py deep`) exposed a run-ID collision — the trace-directory naming scheme assumed one run per second, and concurrent threads starting in the same second silently overwrote each other's debug logs. Noticed because `runs/` had one directory where three were expected, not because the bug looked suspicious on read-through. Fixed with a random suffix; verified the fix by checking that concurrent runs' start timestamps now genuinely coincide while their finish timestamps diverge by round count — direct proof of real parallelism, not an assumption that the thread pool did its job.
 - **Scope discipline**: several roadmap items were deliberately deferred (LLM entity extraction, GraphRAG, path-finding over the citation graph) with the reasoning written down at the time, instead of building speculative abstractions ahead of actual need.
 
 ### Built in collaboration with Claude Code
@@ -229,6 +230,58 @@ project-scoped MCP-серверов может вообще не появить�
 list` показывает `research-engine: ... - ✔ Connected` (реальный
 health-check, не кэш). `opencode.json` таким же образом не
 перепроверялся — свой клиент, свой флоу доверия.
+
+### Глубокое исследование (Фаза 5)
+
+```
+python research.py deep <prompt_file> <out_file>
+```
+
+Тема разбивается на несколько подтем (форсированный tool call к
+DeepSeek — надёжнее, чем просить JSON в свободном тексте), каждая
+подтема исследуется **параллельно** — независимый прогон обычного
+агентского цикла (`ThreadPoolExecutor`) со своим `RunTrace` — а затем
+отдельный синтезирующий вызов сшивает под-отчёты в один связный текст
+(не конкатенация — убирает дублирование между подтемами, выстраивает
+общую структуру, сохраняет источники). Под-отчёты сохраняются рядом с
+итоговым файлом, в `<out_file>.subtopics/` — для прозрачности, не
+только финальный текст. Число подтем — `RESEARCH_DEEP_SUBTOPICS`
+(дефолт 5), параллелизм — `RESEARCH_DEEP_WORKERS` (дефолт 5).
+
+Частичный отказ переживается: если часть подтем упала (сетевая ошибка,
+MAX_ROUNDS), отчёт синтезируется из тех, что удались, а провалы просто
+логируются — останавливаемся полностью только если не удалась ни одна.
+
+По пути — два реальных бага, не гипотетических:
+
+- DeepSeek возвращает `400 "Thinking mode does not support this
+  tool_choice"` на форсированный tool call в режиме рассуждений — не
+  только на `-pro`, тот же результат на `-flash` (совпадает с
+  [известным issue](https://github.com/deepseek-ai/DeepSeek-V3/issues/1376)
+  в репозитории DeepSeek-V3). Просто не послать `thinking` в запросе —
+  не значит выключить его, нужен явный `{"type": "disabled"}`.
+  Декомпозиция — единственный вызов в проекте с отключённым thinking.
+- `RunTrace.run_id` строился как `<секунда>-<провайдер>` — при
+  параллельном запуске нескольких подтем в одну и ту же секунду
+  (обычное дело для `ThreadPoolExecutor`, отправляющего задачи почти
+  одновременно) несколько потоков получали **одинаковый** run_id и
+  тихо затирали `runs/<id>/` друг друга. Сами итоговые отчёты не
+  страдали (возвращаются из функции в память, не читаются с диска), но
+  трейс для отладки — терялся. Пойман на реальном прогоне (в `runs/`
+  осталась 1 директория вместо 3), исправлено случайным суффиксом.
+
+Проверено вживую: разница в момент старта (`started_at`) у всех подтем
+совпадает до секунды, а `finished_at` расходится пропорционально числу
+раундов каждой — прямое доказательство реального параллелизма, не
+последовательного выполнения с похожим логом. `corpus.db` цел
+(`PRAGMA integrity_check` → `ok`) после одновременной записи из трёх
+потоков. Единственный замеченный артефакт качества — синтез дважды
+вставил китайские иероглифы вместо русского слова (`не-приватным基线`
+вместо «не-приватным baseline») — редкий сбой генерации, не системная
+проблема, оставлено как наблюдение.
+
+Пока только для `research.py` (DeepSeek) — `research_gemini.py` этим
+режимом не оснащён, сознательно, первым шагом.
 
 ### Секреты
 
