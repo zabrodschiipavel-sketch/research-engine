@@ -68,11 +68,18 @@ def main(prompt_file, out_file):
         try:
             resp = gemini(history, allow_tools=not last)
         except urllib.error.HTTPError as e:
-            detail = ""
+            raw = ""
             try:
-                detail = e.read().decode()[:300]
+                raw = e.read().decode(errors="replace")
             except Exception:  # noqa: BLE001
                 pass
+            try:
+                err = json.loads(raw)["error"]
+                detail = f"{err.get('status', '')} {err.get('message', '')}".strip()
+                if err.get("details"):
+                    detail += f" | details={json.dumps(err['details'], ensure_ascii=False)}"
+            except Exception:  # noqa: BLE001
+                detail = raw[:1000]
             print(f"HTTP {e.code}: {detail}")
             raise
         u = resp.get("usage", {})
