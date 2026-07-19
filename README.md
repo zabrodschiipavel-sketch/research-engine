@@ -1,5 +1,52 @@
 # research-engine
 
+[English](#english) · [Русский](#русский)
+
+<a id="english"></a>
+## English
+
+**A local-first research agent with a growing memory** — an exploration of how far you can take agentic research tooling using nothing but the Python standard library, two swappable LLM backends, and empirical verification at every step (live API smoke tests over trusting docs, real cross-process runs over unit tests, real bugs found via logs over speculative fixes).
+
+### What it does
+
+Point it at a research question. It autonomously decides which of 8 tools to call — OpenAlex (250M+ papers), CORE (open fulltexts), Brave Search, or its own accumulating local corpus — reads what it finds, and writes a cited report. Every run enriches a local SQLite corpus, so a second query on a related topic is served instantly from cache, no external API calls needed.
+
+### Architecture
+
+- **Two interchangeable LLM drivers** — DeepSeek (OpenAI-style tool calling) and Gemini (its newer Interactions API, whose real request/response shape was reverse-engineered against the live endpoint since the published docs were stale) share one tool implementation, so model comparisons run on identical footing.
+- **Persistent corpus** (`corpus.py`) — SQLite with FTS5 full-text search, DOI/URL/OpenAlex-ID dedup, and a cache-first fulltext store. Verified across processes and across providers, not just unit-tested.
+- **Local RAG** — paragraph-aware chunking, local embeddings via `llama-server` (no cloud embedding API), hybrid BM25+vector search merged with Reciprocal Rank Fusion, degrading gracefully to BM25-only when the embedding server isn't running.
+- **Citation graph** — deterministic, built entirely from OpenAlex metadata already returned by normal search calls (including OpenAlex's own related-works similarity scoring, which meant no custom co-citation heuristic had to be built).
+- **MCP server** (`mcp_server.py`) — a stdio JSON-RPC 2.0 server hand-implemented from the protocol spec (no `mcp` package, matching the project's stdlib-only constraint), exposing the corpus's read surface directly to Claude Code / opencode as native tools.
+
+### Engineering highlights
+
+- **Verified against live systems, not documentation.** Gemini's Interactions API shape didn't match what its docs described — caught via live smoke tests against a real key instead of trusting a fetched summary. Same discipline applied later to a genuine Claude Code product bug hit while wiring up the MCP server: traced to two matching upstream issues ([#9189](https://github.com/anthropics/claude-code/issues/9189), [#13389](https://github.com/anthropics/claude-code/issues/13389)) and a version-gated workaround confirmed against the actual docs rather than guessed from CLI flags.
+- **Real empirical model comparison, not vibes**: matched-topic runs across DeepSeek and a 7-model Gemini zoo, cost/quality tradeoffs written up with sources — including a caught citation hallucination (a real DOI, attached to the wrong paper) traced back to a model that had skipped tool use entirely. See [comparisons/](comparisons/).
+- **A real infrastructure bug, found and fixed, not just worked around**: the local embedding server was silently failing on chunks near ~575 tokens; root-caused via server logs to a too-small default batch size, fixed, and codified into the startup script so it can't regress.
+- **Scope discipline**: several roadmap items were deliberately deferred (LLM entity extraction, GraphRAG, path-finding over the citation graph) with the reasoning written down at the time, instead of building speculative abstractions ahead of actual need.
+
+### Built in collaboration with Claude Code
+
+This project was built pairing with an AI coding agent (Claude Code, running Claude Sonnet 5) across about a dozen sessions — every commit carries a `Co-Authored-By` line accordingly, visible as-is in the git history, nothing edited out. My role was direction, review, and the judgment calls — scope, security tradeoffs (what a local MCP server should and shouldn't expose), what to verify and how; the agent handled implementation and a fair share of the debugging, including tracking down the Claude Code approval bug above once redirected from guessing to actually searching for the answer. [ROADMAP.md](ROADMAP.md) (in Russian) is the unedited build log, phase by phase, dead ends included.
+
+### Stack
+
+Python 3, standard library + SQLite + `numpy` (the one deliberate exception, for brute-force cosine similarity — see ROADMAP for the reasoning). No cloud vector DB, no heavyweight ML framework — embeddings run locally via `llama-server`, CPU-only.
+
+```
+python research.py <prompt_file> <out_file>     # DeepSeek-driven research run
+python research_gemini.py <prompt_file> <out_file>   # same, via Gemini
+python research.py ask "question"               # answer from the local corpus only, no API calls
+```
+
+Full setup and reference docs are in the Russian section below, which is the authoritative version this project was actually built and documented in.
+
+---
+
+<a id="русский"></a>
+## Русский
+
 Исследовательский агент с двумя взаимозаменяемыми драйверами —
 DeepSeek и Gemini (оба через нативный function calling): сам решает,
 какие запросы слать в OpenAlex, CORE, Brave Search и в свой же
@@ -13,7 +60,7 @@ DeepSeek и Gemini (оба через нативный function calling): сам
 дообвязан локальным RAG (гибридный BM25+вектор поиск) и графом
 цитирований — см. [ROADMAP.md](ROADMAP.md).
 
-## Использование
+### Использование
 
 ```
 python research.py <prompt_file> <out_file>          # DeepSeek
@@ -40,7 +87,7 @@ python research.py ask "вопрос"
 равных условиях. Пример прогона обеих моделей на одинаковых темах —
 [comparisons/2026-07-19-deepseek-vs-gemini](comparisons/2026-07-19-deepseek-vs-gemini/SUMMARY.md).
 
-## Память между запусками
+### Память между запусками
 
 - `corpus.py` — SQLite (`corpus.db` рядом со скриптом, путь
   переопределяется `RESEARCH_CORPUS_PATH`). Всё, что находят
@@ -58,7 +105,7 @@ python research.py ask "вопрос"
 не публикуется. Подробности и сквозная проверка (два разных драйвера,
 один и тот же корпус) — Фаза 1 в [ROADMAP.md](ROADMAP.md).
 
-## RAG (Фаза 2)
+### RAG (Фаза 2)
 
 Локальные эмбеддинги — `nomic-embed-text-v1.5` через `llama-server
 --embedding` (мультиязычно, 768 измерений; модель уже была скачана
@@ -80,7 +127,7 @@ ask` используют `corpus.hybrid_search` — RRF-слияние BM25 и 
 Gemini embeddings API как альтернатива — не реализовано, локальный
 путь оказался достаточным.
 
-## Граф цитирований (Фаза 3)
+### Граф цитирований (Фаза 3)
 
 Детерминированный, без LLM — построен на полях OpenAlex, которые и так
 приходят бесплатно вместе с `search_openalex` (`referenced_works` и
@@ -98,7 +145,7 @@ OpenAlex, без своей co-citation эвристики):
 поиск путей между работами — сознательно не реализованы, см. Фазу 3 в
 [ROADMAP.md](ROADMAP.md).
 
-## MCP-сервер (Фаза 4)
+### MCP-сервер (Фаза 4)
 
 Корпус доступен напрямую из Claude Code / opencode как MCP-сервер — не
 через агентский цикл с DeepSeek/Gemini, а как обычные инструменты
@@ -135,7 +182,10 @@ READ-поверхность корпуса, 6 штук: `search_corpus`, `ask_co
 известному DOI), `get_fulltext` с реальным кэш-попаданием и один
 настоящий вызов DeepSeek через `ask_corpus`, плюс обработка плохих
 аргументов, неизвестного метода и битой JSON-строки без падения
-сервера.
+сервера. Дальше — сквозная проверка живой сессией Claude Code
+(`claude -p` со `stream-json` выводом): свежая сессия видит все 6
+`mcp__research-engine__*` инструментов, реально вызывает
+`search_corpus` и получает настоящие данные из корпуса.
 
 Подхват конфига Claude Code тоже проверен вживую: `claude mcp list` /
 `claude mcp get research-engine` изнутри репозитория видят сервер с
@@ -162,7 +212,7 @@ list` показывает `research-engine: ... - ✔ Connected` (реальн�
 health-check, не кэш). `opencode.json` таким же образом не
 перепроверялся — свой клиент, свой флоу доверия.
 
-## Секреты
+### Секреты
 
 Скопируйте `secrets.example.json` в `secrets.json` (лежит рядом со
 скриптом, в `.gitignore`) и заполните ключи:
@@ -193,7 +243,7 @@ Free tier Gemini держит немного запросов в минуту с
 через Gemini одновременно), может словиться `429 too_many_requests`
 даже без `google_search`; тогда просто повторить чуть позже.
 
-## Зависимости
+### Зависимости
 
 Стандартная библиотека Python 3 + `numpy` (brute-force косинус для
 векторного поиска — единственное исключение из принципа «stdlib-only»,

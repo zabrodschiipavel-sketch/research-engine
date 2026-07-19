@@ -1,5 +1,7 @@
 # ROADMAP — план развития research-engine
 
+*This is the unedited, phase-by-phase build log — in Russian, the language the project was actually built and narrated in. For an English overview of the architecture and engineering highlights, see the [English section of README.md](README.md#english).*
+
 ## Видение
 
 Из одноразового агента («промпт → отчёт») — в исследовательскую систему
