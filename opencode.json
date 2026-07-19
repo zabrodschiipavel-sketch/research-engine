@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "research-engine": {
+      "type": "local",
+      "command": ["python", "C:/Users/pavel/research-engine/mcp_server.py"],
+      "enabled": true
+    }
+  }
+}

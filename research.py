@@ -103,18 +103,21 @@ def main(prompt_file, out_file):
     sys.exit(1)
 
 
-def ask(question, limit=8):
-    """Фаза 2: ответ по накопленному корпусу, без похода во внешние API.
-    Один вызов DeepSeek на готовых источниках (гибридный BM25+вектор поиск)."""
+def synthesize_answer(question, limit=8):
+    """Фаза 2/4: ответ по накопленному корпусу, без похода во внешние API.
+    Один вызов DeepSeek на готовых источниках (гибридный BM25+вектор поиск).
+    Возвращает {"answer", "sources"} или {"error"} — не печатает, чтобы
+    одинаково годиться и CLI (ask), и MCP-серверу (Фаза 4)."""
     hits = corpus.hybrid_search(question, limit=limit)
     if not hits:
-        print("В корпусе пока пусто или ничего не нашлось по этому запросу — сначала накопи источники обычными прогонами.")
-        return
+        return {"error": "В корпусе пока пусто или ничего не нашлось по этому запросу — сначала накопи источники обычными прогонами."}
     sources_block = ""
+    src_list = []
     for i, h in enumerate(hits, 1):
         ident = h.get("doi") or h.get("url") or f"work_id={h['work_id']}"
         passage = h.get("best_chunk_text") or h.get("abstract") or ""
         sources_block += f"[{i}] {h.get('title')} ({ident})\n{passage[:1200]}\n\n"
+        src_list.append({"n": i, "title": h.get("title"), "id": ident})
     prompt = (
         "Ответь на вопрос СТРОГО по источникам ниже. После каждого утверждения "
         "указывай номер источника в квадратных скобках, например [2]. Если "
@@ -124,11 +127,19 @@ def ask(question, limit=8):
     )
     resp = deepseek([{"role": "user", "content": prompt}], allow_tools=False)
     answer = resp["choices"][0]["message"].get("content") or ""
-    print(answer)
+    return {"answer": answer, "sources": src_list}
+
+
+def ask(question, limit=8):
+    """CLI-обёртка: печатает результат synthesize_answer в stdout."""
+    result = synthesize_answer(question, limit=limit)
+    if "error" in result:
+        print(result["error"])
+        return
+    print(result["answer"])
     print("\n---\nИсточники:")
-    for i, h in enumerate(hits, 1):
-        ident = h.get("doi") or h.get("url") or ""
-        print(f"[{i}] {h.get('title')} {ident}")
+    for s in result["sources"]:
+        print(f"[{s['n']}] {s['title']} {s['id']}")
 
 
 if __name__ == "__main__":
