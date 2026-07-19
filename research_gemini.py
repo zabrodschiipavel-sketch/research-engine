@@ -12,7 +12,7 @@ import sys
 import urllib.error
 import urllib.request
 
-from sources import SECRETS, TOOL_SPECS, call_tool
+from sources import CORPUS_HINT, SECRETS, TOOL_SPECS, call_tool
 from trace import RunTrace
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows-консоль по умолчанию не UTF-8
@@ -62,7 +62,7 @@ def _extract_text(steps):
 
 def main(prompt_file, out_file):
     prompt = open(prompt_file, encoding="utf-8").read()
-    history = [{"type": "user_input", "content": [{"type": "text", "text": prompt}]}]
+    history = [{"type": "user_input", "content": [{"type": "text", "text": CORPUS_HINT + "\n\n" + prompt}]}]
     total_usage = {"total_input_tokens": 0, "total_output_tokens": 0, "total_thought_tokens": 0}
     trace = RunTrace("gemini", MODEL, prompt_file)
     for round_no in range(MAX_ROUNDS):
@@ -103,7 +103,7 @@ def main(prompt_file, out_file):
             name = c["name"]
             args = c.get("arguments") or {}
             print(f"  [{round_no}] {name}({json.dumps(args, ensure_ascii=False)[:110]})")
-            result = call_tool(name, args)
+            result = call_tool(name, args, run_id=trace.run_id)
             trace.log_call(round_no, name, args, result)
             history.append({
                 "type": "function_result",

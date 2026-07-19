@@ -8,6 +8,8 @@ import json
 import os
 import time
 
+import corpus
+
 RUNS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs")
 
 
@@ -25,6 +27,7 @@ class RunTrace:
             "started_at": ts,
         }
         self._calls_f = open(os.path.join(self.dir, "tool_calls.jsonl"), "w", encoding="utf-8")
+        corpus.record_run_start(self.run_id, provider, model, prompt_file, ts)
 
     def log_call(self, round_no, name, args, result):
         self._calls_f.write(json.dumps(
@@ -35,11 +38,13 @@ class RunTrace:
 
     def finish(self, report_text, usage, rounds):
         self._calls_f.close()
+        finished_at = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         self.meta["usage"] = usage
         self.meta["rounds"] = rounds
-        self.meta["finished_at"] = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        self.meta["finished_at"] = finished_at
         with open(os.path.join(self.dir, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(self.meta, f, ensure_ascii=False, indent=2)
         with open(os.path.join(self.dir, "report.txt"), "w", encoding="utf-8", newline="\n") as f:
             f.write(report_text)
+        corpus.record_run_finish(self.run_id, finished_at, rounds, usage)
         return self.dir

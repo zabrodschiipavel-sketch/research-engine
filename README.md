@@ -2,8 +2,11 @@
 
 Исследовательский агент с двумя взаимозаменяемыми драйверами —
 DeepSeek и Gemini (оба через нативный function calling): сам решает,
-какие запросы слать в OpenAlex, CORE и Brave Search, читает найденные
-источники и пишет итоговый отчёт по промпту.
+какие запросы слать в OpenAlex, CORE, Brave Search и в свой же
+локальный корпус (`corpus.db`), читает найденные источники и пишет
+итоговый отчёт по промпту. Каждый прогон обогащает корпус — второй
+запрос по той же теме находит источники локально и мгновенно, без
+похода во внешние API (см. Фазу 1 в [ROADMAP.md](ROADMAP.md)).
 
 Выделен из [ggrs](https://github.com/zabrodschiipavel-sketch/ggrs)
 (`tools/research_agent.py`) в самостоятельный инструмент — база для
@@ -20,10 +23,30 @@ python research_gemini.py <prompt_file> <out_file>    # Gemini
 формате вернуть отчёт). Результат пишется в `out_file`.
 
 Оба драйвера используют один и тот же набор инструментов из
-[sources.py](sources.py) (`search_openalex`, `search_core`,
-`get_fulltext`, `search_brave`) — сравнение моделей получается на
-равных условиях. Пример прогона обеих моделей на одинаковых темах —
+[sources.py](sources.py) (`search_corpus`, `search_openalex`,
+`search_core`, `get_fulltext`, `search_brave`) — сравнение моделей
+получается на равных условиях. Пример прогона обеих моделей на
+одинаковых темах —
 [comparisons/2026-07-19-deepseek-vs-gemini](comparisons/2026-07-19-deepseek-vs-gemini/SUMMARY.md).
+
+## Память между запусками
+
+- `corpus.py` — SQLite (`corpus.db` рядом со скриптом, путь
+  переопределяется `RESEARCH_CORPUS_PATH`). Всё, что находят
+  `search_openalex`/`search_core`/`search_brave`, автоматически
+  оседает в таблице `works` (дедуп по DOI/core_id/URL); `get_fulltext`
+  сначала проверяет кэш и только потом идёт в CORE API. FTS5-индекс
+  (`bm25`) даёт инструмент агента `search_corpus` — модели явно
+  подсказано (`CORPUS_HINT`) проверять его до похода во внешние API.
+- `trace.py` — полный лог каждого прогона в `runs/<run_id>/`:
+  `meta.json` (провайдер/модель/usage/раунды) и `tool_calls.jsonl`
+  (каждый вызов инструмента с аргументами и полным результатом).
+  Локально, в `.gitignore` — не для коммита, для отладки и как сырьё
+  для будущего чанкинга/эмбеддингов (Фаза 2).
+
+И `runs/`, и `corpus.db` — чисто локальное состояние, ничего из этого
+не публикуется. Подробности и сквозная проверка (два разных драйвера,
+один и тот же корпус) — Фаза 1 в [ROADMAP.md](ROADMAP.md).
 
 ## Секреты
 

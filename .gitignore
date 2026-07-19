@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 runs/
 corpus.db
+corpus.db-wal
+corpus.db-shm

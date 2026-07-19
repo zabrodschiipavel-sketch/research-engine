@@ -13,13 +13,33 @@ import time
 import urllib.parse
 import urllib.request
 
+import corpus
+
 SECRETS_PATH = os.environ.get(
     "RESEARCH_SECRETS_PATH",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "secrets.json"),
 )
 SECRETS = json.load(open(SECRETS_PATH, encoding="utf-8"))
 
+CORPUS_HINT = (
+    "Перед внешними инструментами (search_openalex/search_core/search_brave) "
+    "проверь search_corpus — нужные источники могут уже быть в локальной базе "
+    "с прошлых запусков, это бесплатно и мгновенно."
+)
+
 TOOL_SPECS = [
+    {
+        "name": "search_corpus",
+        "description": "Поиск по локальной базе уже найденных источников (BM25 по названиям/абстрактам/полным текстам из прошлых запусков). Бесплатно и мгновенно — стоит проверить здесь до похода во внешние API.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Поисковый запрос"},
+                "limit": {"type": "integer", "description": "1-20, дефолт 8"},
+            },
+            "required": ["query"],
+        },
+    },
     {
         "name": "search_openalex",
         "description": "Поиск научных работ в OpenAlex (250M+ работ). Возвращает топ работ по релевантности: название, год, авторы, площадка, цитирования, DOI, фрагмент абстракта.",
@@ -128,12 +148,20 @@ def search_core(query, limit=3):
 
 
 def get_fulltext(core_id, offset=0):
-    data = core_get(f"https://api.core.ac.uk/v3/works/{int(core_id)}")
-    ft = data.get("fullText") or ""
-    if not ft:
-        return {"error": "полный текст недоступен для этой записи"}
-    chunk = ft[int(offset):int(offset) + 30000]
-    return {"total_chars": len(ft), "offset": int(offset), "text": chunk}
+    core_id = int(core_id)
+    offset = int(offset)
+    cached = corpus.get_cached_fulltext(core_id)
+    if cached is not None:
+        full_text, total_chars = cached
+    else:
+        data = core_get(f"https://api.core.ac.uk/v3/works/{core_id}")
+        full_text = data.get("fullText") or ""
+        if not full_text:
+            return {"error": "полный текст недоступен для этой записи"}
+        corpus.cache_fulltext(core_id, full_text)
+        total_chars = len(full_text)
+    chunk = full_text[offset:offset + 30000]
+    return {"total_chars": total_chars, "offset": offset, "text": chunk, "cached": cached is not None}
 
 
 def reconstruct_abstract(inv_idx, limit=350):
@@ -186,16 +214,31 @@ def search_openalex(query, from_year=None, per_page=8, sort_by_citations=False):
     return out
 
 
+def search_corpus(query, limit=8):
+    return corpus.search(query, limit=limit)
+
+
 TOOL_FUNCTIONS = {
+    "search_corpus": search_corpus,
     "search_openalex": search_openalex,
     "search_core": search_core,
     "get_fulltext": get_fulltext,
     "search_brave": search_brave,
 }
 
+_INGEST = {
+    "search_openalex": corpus.ingest_openalex,
+    "search_core": corpus.ingest_core,
+    "search_brave": corpus.ingest_brave,
+}
 
-def call_tool(name, args):
+
+def call_tool(name, args, run_id=None):
     try:
-        return TOOL_FUNCTIONS[name](**args)
+        result = TOOL_FUNCTIONS[name](**args)
     except Exception as e:  # noqa: BLE001 — вернуть ошибку модели
         return {"error": str(e)}
+    ingest = _INGEST.get(name)
+    if ingest is not None and isinstance(result, list):
+        ingest(result, run_id=run_id)
+    return result
