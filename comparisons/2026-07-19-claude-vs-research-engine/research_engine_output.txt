@@ -1,0 +1,44 @@
+# Speculative Decoding для ускорения инференса LLM: отчёт
+
+## 1. Как работает базовая идея
+
+Авторегрессионный декодинг LLM упирается в пропускную способность памяти (memory bandwidth bound): на каждом шаге модель считывает все свои веса из памяти, чтобы сгенерировать ровно один токен. Вычислительные ядра при этом простаивают. Speculative decoding обходит это ограничение двухфазным механизмом «draft-then-verify»:
+
+- **Draft-фаза**: лёгкая draft-модель (например, та же LLM, квантованная до 0.5B–1.5B параметров, или специализированные предсказывающие головы) быстро генерирует K токенов-кандидатов — автогрессивно, но дёшево.
+- **Verify-фаза**: основная (target) модель за один прямой проход проверяет все K токенов параллельно, принимая те, что совпадают с её собственным распределением, и отклоняя первый несовпавший (с корректирующим сэмплированием из распределения target-модели).
+
+Ускорение возникает потому, что один дорогой проход target-модели даёт более одного принятого токена. При этом **качество не теряется**: математически доказано, что результирующее распределение токенов идентично тому, что дал бы обычный авторегрессионный сэмплинг из target-модели (Leviathan et al., 2022; Chen et al., 2023).
+
+## 2. Конкретные методы и их отличия
+
+**Оригинальный speculative decoding (Leviathan et al., 2022 / Chen et al., 2023 — DeepMind)**. Независимая маленькая draft-модель (обычно 4–8× меньше target) генерирует K токенов, target верифицирует. Требует отдельной модели с тем же токенизатором. Ускорение: 2–3× на чистом декодинге. Реализован в llama.cpp через `--model-draft` и бинарник `llama-speculative`.
+
+**Medusa (Cai et al., 2024)**. Вместо отдельной draft-модели к целевой LLM добавляются несколько дополнительных предсказывающих «голов» (Medusa heads) на верхних слоях. Каждая голова предсказывает свой токен — получается древовидный набор кандидатов, верифицируемых одним проходом target-модели через tree attention. Не требует второй модели, только дообучение голов (~несколько часов на GPU). Ускорение: 2.2–2.8×. Репозиторий: github.com/FasterDecoding/Medusa.
+
+**EAGLE / EAGLE-2 (Li et al., 2024)**. Ключевая идея: авторегрессия на уровне фичей (второй-сверху слой эмбеддингов) проще и точнее, чем на уровне токенов. EAGLE обучает лёгкий модуль, который по фичам target-модели предсказывает следующие фичи, из которых декодируются draft-токены. EAGLE-2 добавляет динамическое draft-дерево, адаптирующееся к уверенности предсказаний. Ускорение: до 3–4× (EAGLE-2), state-of-the-art. Репозиторий: github.com/SafeAILab/EAGLE. Поддержка в llama.cpp — в процессе (требует интеграции фича-экстрактора).
+
+**Lookahead decoding (Fu et al., 2024)**. Не требует вообще никакой draft-модели и обучения: использует n-граммный кэш (Jacobi-итерации) самой target-модели для генерации кандидатов. Ускорение скромнее — 1.5–2.2×, но zero-cost по памяти и подготовке. Привлекательно для CPU-сценариев. Репозиторий: github.com/hao-ai-lab/LookaheadDecoding.
+
+## 3. Практические ограничения
+
+**Когда выигрыша нет:**
+- Batch size > 1: память уже насыщена, compute становится узким местом — draft-модель не даёт ускорения.
+- Очень длинный контекст: KV-кэш съедает память, оставляя меньше места под draft-модель; верификация больших draft-деревьев тоже растёт по памяти.
+- Низкое качество draft-модели (acceptance rate < 50%): overhead на отклонённые токены съедает выигрыш. Важно, чтобы draft-модель имела тот же токенизатор и была обучена на схожих данных.
+
+**Для локального CPU-инференса (llama.cpp-стек):**
+- CPU-инференс **строго memory-bound** — speculative decoding здесь даёт даже больший относительный выигрыш, чем на GPU, потому что стоимость верификации пропорциональна пропускной способности памяти, а не compute. Пользователи llama.cpp на Reddit докладывают 25–60% ускорения.
+- Ограничение: нужна RAM под обе модели (target + draft). Для 7B target + 0.5B draft в Q4 — порядка 6–7 ГБ, что разумно. Для 70B — уже серьёзно.
+- Практичный вариант: использовать tiny draft-модель того же семейства (например, Llama-3.2-1B как draft для Llama-3.1-8B) либо MTP (multi-token prediction) — встроенный speculative decoding в Qwen 3.6 и DeepSeek-V3, поддерживаемый в llama.cpp напрямую без второй модели.
+- Medusa-головы требуют дообучения и интеграции — на практике сложнее, чем «подсунуть вторую модель» через `--model-draft`.
+
+## 4. Источники
+
+1. Leviathan et al. «Fast Inference from Transformers via Speculative Decoding» (ICML 2023). arXiv:2211.17192 — https://arxiv.org/abs/2211.17192
+2. Chen et al. (DeepMind) «Accelerating Large Language Model Decoding with Speculative Sampling» (2023). arXiv:2302.01318 — https://arxiv.org/abs/2302.01318
+3. Cai et al. «Medusa: Simple Framework for Accelerating LLM Generation with Multiple Decoding Heads» (2024). arXiv:2401.10774 — https://arxiv.org/abs/2401.10774 | GitHub: https://github.com/FasterDecoding/Medusa
+4. Li et al. «EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty» (ICML 2024); «EAGLE-2: Faster Inference of Language Models with Dynamic Draft Trees» (EMNLP 2024). arXiv:2401.15077 — https://arxiv.org/abs/2401.15077 | GitHub: https://github.com/SafeAILab/EAGLE
+5. Fu et al. «Break the Sequential Dependency of LLM Inference Using Lookahead Decoding» (2024). arXiv:2402.02057 — https://arxiv.org/abs/2402.02057 | GitHub: https://github.com/hao-ai-lab/LookaheadDecoding
+6. Xia et al. «Unlocking Efficiency in Large Language Model Inference: A Comprehensive Survey of Speculative Decoding» (ACL 2024 Findings). DOI: 10.18653/v1/2024.findings-acl.456 — https://aclanthology.org/2024.findings-acl.456/
+7. llama.cpp speculative decoding documentation — https://github.com/ggml-org/llama.cpp/blob/master/docs/speculative.md
+8. Awesome Speculative Decoding (курируемый список статей) — https://github.com/Geralt-Targaryen/Awesome-Speculative-Decoding

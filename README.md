@@ -28,6 +28,7 @@ Point it at a research question. It autonomously decides which of 8 tools to cal
 - **Verified against live systems, not documentation.** Gemini's Interactions API shape didn't match what its docs described — caught via live smoke tests against a real key instead of trusting a fetched summary. Same discipline applied later to a genuine Claude Code product bug hit while wiring up the MCP server: traced to two matching upstream issues ([#9189](https://github.com/anthropics/claude-code/issues/9189), [#13389](https://github.com/anthropics/claude-code/issues/13389)) and a version-gated workaround confirmed against the actual docs rather than guessed from CLI flags.
 - **Real empirical model comparison, not vibes**: matched-topic runs across DeepSeek and a 7-model Gemini zoo, cost/quality tradeoffs written up with sources — including a caught citation hallucination (a real DOI, attached to the wrong paper) traced back to a model that had skipped tool use entirely. See [comparisons/](comparisons/).
 - **A real infrastructure bug, found and fixed, not just worked around**: the local embedding server was silently failing on chunks near ~575 tokens; root-caused via server logs to a too-small default batch size, fixed, and codified into the startup script so it can't regress.
+- **The core design premise, quantified rather than assumed**: this project exists to keep expensive research legwork off a Claude Code session's own quota. Measured it directly — the identical research prompt run through `research.py` (DeepSeek) against the same prompt run through isolated `claude -p` sessions came out **23–46× more expensive** on Claude, with comparable output quality. Caught and fixed a real methodology bug along the way (a non-interactive session silently denying an unapproved tool instead of erroring — invisible unless you read the raw event stream). See [comparisons/2026-07-19-claude-vs-research-engine](comparisons/2026-07-19-claude-vs-research-engine/SUMMARY.md).
 - **Scope discipline**: several roadmap items were deliberately deferred (LLM entity extraction, GraphRAG, path-finding over the citation graph) with the reasoning written down at the time, instead of building speculative abstractions ahead of actual need.
 
 ### Built in collaboration with Claude Code
@@ -63,6 +64,13 @@ DeepSeek и Gemini (оба через нативный function calling): сам
 (`tools/research_agent.py`) в самостоятельный инструмент, дальше
 дообвязан локальным RAG (гибридный BM25+вектор поиск) и графом
 цитирований — см. [ROADMAP.md](ROADMAP.md).
+
+Исходный мотив — экономия квоты Claude: делегировать объёмное
+исследование дешёвому внешнему драйверу вместо того, чтобы Claude Code
+тратил токены сам. Проверено количественно на одинаковом промпте —
+DeepSeek обошёлся **в 23–46 раз дешевле** прямого запроса через Claude,
+при сопоставимом качестве отчёта — разбор в
+[comparisons/2026-07-19-claude-vs-research-engine](comparisons/2026-07-19-claude-vs-research-engine/SUMMARY.md).
 
 ### Использование
 
