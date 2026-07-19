@@ -1,3 +1,5 @@
 secrets.json
 __pycache__/
 *.pyc
+runs/
+corpus.db

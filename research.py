@@ -13,6 +13,9 @@ import urllib.error
 import urllib.request
 
 from sources import SECRETS, TOOL_SPECS, call_tool
+from trace import RunTrace
+
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows-консоль по умолчанию не UTF-8
 
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 MAX_ROUNDS = 16
@@ -48,6 +51,7 @@ def main(prompt_file, out_file):
     prompt = open(prompt_file, encoding="utf-8").read()
     messages = [{"role": "user", "content": prompt}]
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+    trace = RunTrace("deepseek", MODEL, prompt_file)
     for round_no in range(MAX_ROUNDS):
         last = round_no == MAX_ROUNDS - 1
         if last:
@@ -73,8 +77,10 @@ def main(prompt_file, out_file):
         messages.append(msg)
         calls = msg.get("tool_calls") or []
         if not calls:
+            report = msg.get("content") or ""
             with open(out_file, "w", encoding="utf-8", newline="\n") as f:
-                f.write(msg.get("content") or "")
+                f.write(report)
+            trace.finish(report, total_usage, round_no + 1)
             print(f"DONE rounds={round_no + 1} usage={total_usage}")
             return
         for tc in calls:
@@ -82,11 +88,13 @@ def main(prompt_file, out_file):
             args = json.loads(tc["function"]["arguments"] or "{}")
             print(f"  [{round_no}] {name}({json.dumps(args, ensure_ascii=False)[:110]})")
             result = call_tool(name, args)
+            trace.log_call(round_no, name, args, result)
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc["id"],
                 "content": json.dumps(result, ensure_ascii=False),
             })
+    trace.finish("", total_usage, MAX_ROUNDS)
     print("MAX_ROUNDS exceeded - report not produced")
     sys.exit(1)
 

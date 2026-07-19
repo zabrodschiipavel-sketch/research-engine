@@ -13,6 +13,9 @@ import urllib.error
 import urllib.request
 
 from sources import SECRETS, TOOL_SPECS, call_tool
+from trace import RunTrace
+
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows-консоль по умолчанию не UTF-8
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 MAX_ROUNDS = 16
@@ -61,6 +64,7 @@ def main(prompt_file, out_file):
     prompt = open(prompt_file, encoding="utf-8").read()
     history = [{"type": "user_input", "content": [{"type": "text", "text": prompt}]}]
     total_usage = {"total_input_tokens": 0, "total_output_tokens": 0, "total_thought_tokens": 0}
+    trace = RunTrace("gemini", MODEL, prompt_file)
     for round_no in range(MAX_ROUNDS):
         last = round_no == MAX_ROUNDS - 1
         if last:
@@ -89,8 +93,10 @@ def main(prompt_file, out_file):
         history.extend(steps)
         calls = [s for s in steps if s.get("type") == "function_call"]
         if resp.get("status") == "completed" or not calls:
+            report = _extract_text(steps)
             with open(out_file, "w", encoding="utf-8", newline="\n") as f:
-                f.write(_extract_text(steps))
+                f.write(report)
+            trace.finish(report, total_usage, round_no + 1)
             print(f"DONE rounds={round_no + 1} usage={total_usage}")
             return
         for c in calls:
@@ -98,12 +104,14 @@ def main(prompt_file, out_file):
             args = c.get("arguments") or {}
             print(f"  [{round_no}] {name}({json.dumps(args, ensure_ascii=False)[:110]})")
             result = call_tool(name, args)
+            trace.log_call(round_no, name, args, result)
             history.append({
                 "type": "function_result",
                 "name": name,
                 "call_id": c["id"],
                 "result": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}],
             })
+    trace.finish("", total_usage, MAX_ROUNDS)
     print("MAX_ROUNDS exceeded - report not produced")
     sys.exit(1)
 
