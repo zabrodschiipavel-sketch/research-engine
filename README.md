@@ -11,6 +11,10 @@
 
 Point it at a research question. It autonomously decides which of 8 tools to call — OpenAlex (250M+ papers), CORE (open fulltexts), Brave Search, or its own accumulating local corpus — reads what it finds, and writes a cited report. Every run enriches a local SQLite corpus, so a second query on a related topic is served instantly from cache, no external API calls needed.
 
+![Demo: `research.py ask` answering from the local corpus with citations](docs/demo.gif)
+
+*Real output from a real run — see [docs/make_demo_gif.py](docs/make_demo_gif.py) for how this was captured (not a screen recording; see the note there for why).*
+
 ### Architecture
 
 - **Two interchangeable LLM drivers** — DeepSeek (OpenAI-style tool calling) and Gemini (its newer Interactions API, whose real request/response shape was reverse-engineered against the live endpoint since the published docs were stale) share one tool implementation, so model comparisons run on identical footing.
@@ -79,6 +83,12 @@ python research.py ask "вопрос"
 внешние API. Секунды, почти бесплатно. Требует эмбеддинг-сервер для
 полноценного качества (см. «RAG» ниже) — без него тихо деградирует до
 чистого BM25.
+
+![Демо: research.py ask отвечает по локальному корпусу с цитатами](docs/demo.gif)
+
+Реальный вывод реального прогона — как записано, см.
+[docs/make_demo_gif.py](docs/make_demo_gif.py) (не скринкаст, причина
+объяснена в комментарии сверху файла).
 
 Оба драйвера используют один и тот же набор инструментов из
 [sources.py](sources.py) (`search_corpus`, `search_openalex`,
